@@ -47,7 +47,7 @@ pipeline {
         stage('Checkout Code') {
             steps {
                 echo "📦 Checking out code..."
-                git branch: 'main', url: 'https://github.com/vking6007/team3project.git'
+                git branch: 'master', url: 'https://github.com/vking6007/team3project.git'
             }
         }
 
