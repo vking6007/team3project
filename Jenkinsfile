@@ -80,12 +80,15 @@ pipeline {
 
         stage('Build Docker Image') {
             steps {
-                echo "🐳 Building Docker image..."
-                def tag = (params.ENVIRONMENT == 'none') ? 'build' : params.ENVIRONMENT
-                sh "docker build -t ${IMAGE_NAME}:${tag} ."
-                echo "✅ Docker image built successfully"
+                script {
+                    echo "🐳 Building Docker image..."
+                    def tag = (params.ENVIRONMENT == 'none') ? 'build' : params.ENVIRONMENT
+                    sh "docker build -t ${IMAGE_NAME}:${tag} ."
+                    echo "✅ Docker image built successfully"
+                }
             }
         }
+
 
         stage('Archive Artifacts') {
             steps {
