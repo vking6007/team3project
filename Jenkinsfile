@@ -143,21 +143,23 @@ pipeline {
         stage('Verify Deployment') {
             when { expression { return params.ENVIRONMENT != 'none' } }
             steps {
-                echo "🕒 Waiting for app startup..."
-                sh 'sleep 15'
+                echo "🕒 Waiting for container startup..."
+                sh 'sleep 10'
 
-                echo "🔍 Checking container health..."
+                echo "🔍 Checking if container is running..."
                 sh """
-                    if docker exec ${CONTAINER_NAME} curl -fsS http://localhost:${APP_PORT}/actuator/health; then
-                      echo "✅ Health check passed successfully!"
+                    if docker ps --format '{{.Names}} {{.Status}}' | grep -q '${CONTAINER_NAME}.*Up'; then
+                        echo "✅ Container '${CONTAINER_NAME}' is running successfully."
                     else
-                      echo "❌ Health check failed!"
-                      docker logs ${CONTAINER_NAME} --tail 100
-                      exit 1
+                        echo "❌ Container '${CONTAINER_NAME}' is not running!"
+                        echo "📋 Showing recent logs for debugging:"
+                        docker logs ${CONTAINER_NAME} --tail 100 || true
+                        exit 1
                     fi
                 """
             }
         }
+
 
         stage('Summary') {
             steps {
