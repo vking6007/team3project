@@ -6,48 +6,67 @@ pipeline {
         maven 'Maven_3.9.6'
     }
 
+    // Appears only in manual builds
     parameters {
-        choice(name: 'ENVIRONMENT', choices: ['dev', 'prod'], description: 'Select deployment environment')
+        choice(name: 'ENVIRONMENT', choices: ['none', 'dev', 'prod'], description: 'Choose environment for deployment (none = build only)')
     }
 
     environment {
         PROJECT = "team3"
-        IMAGE_NAME = "${PROJECT}-springboot-app"
         APP_PORT = "8085"
     }
 
     stages {
 
+        stage('Checkout Code') {
+            steps {
+                echo "📦 Checking out branch: ${env.BRANCH_NAME}"
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: "*/${env.BRANCH_NAME}"]],
+                    userRemoteConfigs: [[url: 'https://github.com/vking6007/team3project.git']]
+                ])
+            }
+        }
+
         stage('Initialize Environment Variables') {
             steps {
                 script {
+                    // Make branch name safe for Docker
+                    env.SAFE_BRANCH = env.BRANCH_NAME.replaceAll('/', '-')
+                    env.IMAGE_NAME = "${PROJECT}-${env.SAFE_BRANCH}-springboot-app"
+
                     if (params.ENVIRONMENT == 'prod') {
-                        env.CONTAINER_NAME = "${PROJECT}-springboot-prod"
+                        env.CONTAINER_NAME = "${PROJECT}-${env.SAFE_BRANCH}-springboot-prod"
                         env.HOST_PORT = "8089"
                         env.DB_HOST = "team_3_prod_postgres"
                         env.DB_NAME = "team_3_prod_db"
                         CRED_ID = "team3_prod_credentials"
-                    } else {
-                        env.CONTAINER_NAME = "${PROJECT}-springboot-dev"
+                    } else if (params.ENVIRONMENT == 'dev') {
+                        env.CONTAINER_NAME = "${PROJECT}-${env.SAFE_BRANCH}-springboot-dev"
                         env.HOST_PORT = "8090"
+                        env.DB_HOST = "team_3_dev_postgres"
+                        env.DB_NAME = "team_3_db"
+                        CRED_ID = "team3_dev_credentials"
+                    } else {
+                        // Build-only mode (no deployment)
+                        env.CONTAINER_NAME = "${PROJECT}-${env.SAFE_BRANCH}-build"
+                        env.HOST_PORT = "none"
                         env.DB_HOST = "team_3_dev_postgres"
                         env.DB_NAME = "team_3_db"
                         CRED_ID = "team3_dev_credentials"
                     }
 
-                     env.DB_URL = "jdbc:postgresql://${env.DB_HOST}:5432/${env.DB_NAME}"
+                    env.DB_URL = "jdbc:postgresql://${env.DB_HOST}:5432/${env.DB_NAME}"
 
-                    echo "🌍 Environment: ${params.ENVIRONMENT}"
-                    echo "📦 Container: ${env.CONTAINER_NAME}"
-                    echo "🗄 Database: ${env.DB_URL}"
+                    echo """
+                    🌿 Branch: ${env.BRANCH_NAME}
+                    🌍 Environment: ${params.ENVIRONMENT}
+                    📦 Image: ${env.IMAGE_NAME}
+                    🧱 Container: ${env.CONTAINER_NAME}
+                    🗄 DB_URL: ${env.DB_URL}
+                    """
                 }
-            }
-        }
-
-        stage('Checkout Code') {
-            steps {
-                echo "📦 Checking out code..."
-                git branch: 'master', url: 'https://github.com/vking6007/team3project.git'
             }
         }
 
@@ -62,13 +81,23 @@ pipeline {
         stage('Build Docker Image') {
             steps {
                 echo "🐳 Building Docker image..."
-                sh "docker build -t ${IMAGE_NAME}:${params.ENVIRONMENT} ."
+                def tag = (params.ENVIRONMENT == 'none') ? 'build' : params.ENVIRONMENT
+                sh "docker build -t ${IMAGE_NAME}:${tag} ."
+                echo "✅ Docker image built successfully"
+            }
+        }
+
+        stage('Archive Artifacts') {
+            steps {
+                echo "🗂 Archiving JAR..."
+                archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
             }
         }
 
         stage('Stop Previous Container') {
+            when { expression { return params.ENVIRONMENT != 'none' } }
             steps {
-                echo "🛑 Stopping old container..."
+                echo "🛑 Stopping previous container if exists..."
                 sh """
                     docker stop ${CONTAINER_NAME} || true
                     docker rm ${CONTAINER_NAME} || true
@@ -77,17 +106,18 @@ pipeline {
         }
 
         stage('Run New Container') {
+            when { expression { return params.ENVIRONMENT != 'none' } }
             steps {
                 script {
                     withCredentials([usernamePassword(credentialsId: CRED_ID,
                                                       usernameVariable: 'DB_USER',
                                                       passwordVariable: 'DB_PASS')]) {
 
-                        echo "🚀 Deploying new ${params.ENVIRONMENT} container..."
+                        echo "🚀 Deploying ${env.BRANCH_NAME} branch to ${params.ENVIRONMENT} environment..."
 
                         sh """
                             if docker ps --format '{{.Ports}}' | grep -q ':${HOST_PORT}->'; then
-                              echo '⚠️ Port ${HOST_PORT} in use. Stopping...'
+                              echo "⚠️ Port ${HOST_PORT} in use. Stopping container..."
                               docker ps --format '{{.ID}} {{.Ports}}' | grep ':${HOST_PORT}->' | awk '{print \$1}' | xargs -r docker stop
                             fi
 
@@ -108,44 +138,54 @@ pipeline {
         }
 
         stage('Verify Deployment') {
+            when { expression { return params.ENVIRONMENT != 'none' } }
             steps {
                 echo "🕒 Waiting for app startup..."
-                sh 'sleep 10'
+                sh 'sleep 15'
 
-                echo "🔍 Checking container health from inside the container..."
+                echo "🔍 Checking container health..."
                 sh """
-                    RETRIES=12
-                    COUNT=0
-                    until [ \$COUNT -ge \$RETRIES ]
-                    do
-                      echo "Attempt \$((COUNT+1)) of \$RETRIES..."
-                      if docker exec ${CONTAINER_NAME} curl -fsS http://localhost:${APP_PORT}/actuator/health > /dev/null 2>&1; then
-                        echo "✅ Health check passed inside container."
-                        exit 0
-                      fi
-                      COUNT=\$((COUNT+1))
-                      sleep 5
-                    done
-
-                    echo "❌ Health check failed after \$RETRIES attempts. Showing container logs:"
-                    docker logs ${CONTAINER_NAME} --tail 300 || true
-                    exit 1
+                    if docker exec ${CONTAINER_NAME} curl -fsS http://localhost:${APP_PORT}/actuator/health; then
+                      echo "✅ Health check passed successfully!"
+                    else
+                      echo "❌ Health check failed!"
+                      docker logs ${CONTAINER_NAME} --tail 100
+                      exit 1
+                    fi
                 """
+            }
+        }
+
+        stage('Summary') {
+            steps {
+                script {
+                    if (params.ENVIRONMENT == 'none') {
+                        echo """
+                        ✅ Build-only mode completed for branch '${env.BRANCH_NAME}'
+                        🔹 Docker image: ${IMAGE_NAME}:build
+                        🔹 No deployment performed automatically.
+                        """
+                    } else {
+                        echo """
+                        🎉 Successfully deployed '${env.BRANCH_NAME}' to ${params.ENVIRONMENT}
+                        🌍 URL: http://168.220.248.40:${HOST_PORT}
+                        """
+                    }
+                }
             }
         }
     }
 
     post {
         success {
-            echo "🎉 ${params.ENVIRONMENT.toUpperCase()} Deployment Successful!"
-            echo "🌍 App running at: http://168.220.248.40:${HOST_PORT}"
+            echo "✅ Jenkins pipeline completed successfully for branch ${env.BRANCH_NAME} (${params.ENVIRONMENT})"
         }
         failure {
-            echo "❌ ${params.ENVIRONMENT.toUpperCase()} Deployment Failed!"
+            echo "❌ Pipeline failed for branch ${env.BRANCH_NAME} (${params.ENVIRONMENT})"
             sh 'docker logs ${CONTAINER_NAME} || true'
         }
         always {
-            echo "✅ Jenkins Pipeline finished for ${params.ENVIRONMENT.toUpperCase()}."
+            echo "📦 Pipeline finished execution."
         }
     }
 }
